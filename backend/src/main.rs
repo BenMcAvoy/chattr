@@ -1,70 +1,86 @@
-use std::{env, path::PathBuf, sync::mpsc::{channel, Sender}};
-use notify::{Watcher, RecursiveMode, Event};
-use libloading::{Library, Symbol};
-use azalea::FormattedText;
-use tokio::runtime::Runtime;
+use std::{
+    collections::HashMap,
+    env,
+    ffi::OsStr,
+    fs,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
-type SourceLaunchFunction = fn(Box<Sender<FormattedText>>) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+use bichannel::Channel;
+use common::SourceMessage;
+
+type SourceLaunchFunction = fn(
+    Box<Channel<SourceMessage, SourceMessage>>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+// #[derive(Debug)]
+// struct Source {
+//     channel: Channel<SourceMessage, SourceMessage>,
+// }
+
+// impl Source {
+//     pub fn new(channel: Channel<SourceMessage, SourceMessage>) -> Self {
+//         Self { channel }
+//     }
+// }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     #[allow(unused_variables)]
     #[cfg(debug_assertions)]
-    let mut watch_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    watch_dir.pop();
-    watch_dir.push("target/debug/");
+    let mut frontends_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    frontends_dir.pop();
+    frontends_dir.push("target/debug/");
+
     #[cfg(not(debug_assertions))]
-    let watch_dir = "./frontends";
+    let frontends_dir = "./frontends";
 
-    let mut watcher = notify::recommended_watcher(|res: std::result::Result<Event, _>| {
-        match res {
-            Ok(event) => {
-                let path = match event.paths.first() {
-                    Some(path) => path,
-                    None => return,
-                };
+    let map: HashMap<String, Channel<SourceMessage, SourceMessage>> = HashMap::new();
+    let map = Arc::new(Mutex::new(map));
 
-                if let Some(ext) = path.extension() {
-                    if ext != "dll" && ext != "so" {
-                        return;
-                    }
-                } else {
-                    return;
-                }
+    let files: Vec<_> = fs::read_dir(&frontends_dir)?
+        .map(|f| f.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .and_then(OsStr::to_str)
+                .map_or(false, |ext| ext == "dll" || ext == "so")
+        })
+        .collect();
 
-                if let Some(path_str) = path.to_str() {
-                    if path_str.contains("deps") {
-                        return;
-                    }
-                }
+    for file in files {
+        if let Some(filename) = file.file_name() {
+            let filename_str = filename.to_string_lossy().to_string();
+            println!("Found frontend `{filename_str}`");
 
-                unsafe {
-                    println!("Loading {}", path.to_str().unwrap());
+            if filename_str == "libdiscord.so" {
+                continue;
+            }
 
-                    match Library::new(path) {
-                        Ok(lib) => {
-                            println!("Loaded {}", path.to_str().unwrap());
+            let lib = unsafe { libloading::Library::new(&file)? };
 
-                            lib.get::<Symbol<fn()>>(b"hello").expect("Could not get startup function")();
+            let (l, r) = bichannel::channel();
+            map.lock().unwrap().insert(filename_str, r);
 
-                            let startup: Symbol<SourceLaunchFunction> = lib.get(b"launch").expect("Could not get startup function");
-                            Runtime::new().unwrap().block_on(startup(Box::new(channel().0)));
-                        },
-                        Err(e) => {
-                            eprintln!("Failed to load library: {}", e);
-                        }
-                    }
+            tokio::task::spawn(async move {
+                let startup: libloading::Symbol<SourceLaunchFunction> =
+                    unsafe { lib.get(b"launch").unwrap() };
 
-                }
-            },
-            Err(e) => println!("watch error: {:?}", e),
+                startup(Box::new(l)).await;
+            });
         }
-    })?;
+    }
 
-    watcher.watch(&watch_dir, RecursiveMode::Recursive)?;
+    // println!("Sleeping for 10 seconds");
+    // thread::sleep(Duration::from_secs(10));
+    // println!("Done sleeping");
 
     loop {
-        println!("Looping");
-        std::thread::park();
+        let map = map.lock().unwrap();
+        let channel = map.get("libminecraft.so").unwrap();
+
+        while let Ok(event) = channel.try_recv() {
+            println!("Got event: {event:?}");
+        }
     }
 }

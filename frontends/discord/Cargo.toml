@@ -7,3 +7,5 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
+bichannel = { version = "0.0.4", features = ["crossbeam"] }
+common = { path = "../../common" }

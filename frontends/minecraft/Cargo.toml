@@ -13,5 +13,8 @@ lazy_static = "1.4.0"
 dotenvy = "0.15.7"
 tracing = "0.1.40"
 
-azalea = { git = "https://github.com/azalea-rs/azalea", version = "0.9.0" }
+bichannel = { version = "0.0.4", features = ["crossbeam"] }
 tokio = { version = "1.36.0", features = ["full"] }
+
+azalea = { git = "https://github.com/azalea-rs/azalea", version = "0.9.0" }
+common = { path = "../../common" }
